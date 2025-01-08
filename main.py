@@ -12,12 +12,13 @@ from time import sleep
 
 from fastapi import FastAPI, Request
 from playwright.async_api import async_playwright, BrowserContext, Page
-from playwright.sync_api import sync_playwright
+
 
 from result import Result
 
 browser: BrowserContext = None
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',stream=sys.stdout)
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -103,6 +104,68 @@ async def instagram_parse(link):
         return Result.fail_with_msg(f"instagram parse failed:{e.args[0]}")
 
 
+async def fb_login(username: str, password: str):
+    logging.info("fb login username [%s]", username)
+    browser_ = await get_browser()
+    try:
+        page = await browser_.new_page()
+    except Exception as e:
+        global browser
+        browser = None
+        return Result.fail_with_msg(f"new page failed:{e.args[0]}")
+    await page.set_viewport_size({"width": 1920, "height": 1080})
+    # 设置页面的缩放比例，例如将页面内容缩放至90%
+    await page.evaluate("() => document.body.style.zoom='90%'")
+    facebook_home = "https://www.facebook.com/login/"
+    logging.info(f"GO TO {facebook_home}")
+    await page.goto(facebook_home)
+
+
+    login_button_locator = page.locator('//button[@id="loginbutton"] | //button[@data-testid="royal_login_button"]')
+    try:
+        try:
+            logging.info("wait dialog cookie policy")
+            cookie_popup_div = page.locator('//div[contains(@aria-label, "拒绝使用非必要 Cookie")] | //span[text()="Decline optional cookies"]')
+            if await cookie_popup_div.count() > 0:
+                logging.info("click first cookie policy choose")
+                await cookie_popup_div.first.wait_for(state="visible", timeout=3000)  # 等待最多3秒
+                await cookie_popup_div.first.click()
+        except Exception as e:
+            logging.warning("No Cookie policy", e)
+        if await login_button_locator.is_visible():
+            await page.wait_for_function("window.location.href.startsWith('https://www.facebook.com/login/')",timeout=6000 * 10 * 4)
+            logging.info("Login Page Load normal")
+
+            await page.fill('//input[@autocomplete="username"] | //input[@data-testid="royal_email"]', username)
+            sleep(1)
+            await page.fill('//input[@autocomplete="current-password"] | //input[@data-testid="royal_pass"]', password)
+            sleep(1)
+            await login_button_locator.click()
+            await page.wait_for_load_state('load', timeout=10000)  # 10秒等待加载完成
+
+            captcha = page.locator('//img[contains(@src, "/captcha/tfbimage")]')
+            if await captcha.count() > 0:
+                captcha_url = await captcha.get_attribute("src")
+                logging.info(f"fb captcha:{captcha_url}")
+                captcha_code = input("请输入验证码: ")
+                captcha_input = page.locator('input[autocomplete="off"]')
+                await captcha_input.fill(captcha_code)
+                continue_button = page.locator('//span[text()="Continue"]')
+                await continue_button.click()
+                await page.wait_for_load_state('load', timeout=10000)  # 10秒等待加载完成
+
+            if await page.wait_for_function("window.location.href === 'https://www.facebook.com/'",
+                                            timeout=6000 * 10 * 4):
+                await page.goto("https://www.facebook.com/")
+                await page.wait_for_function(f"window.location.href === 'https://www.facebook.com/'",
+                                             timeout=6000 * 10 * 4)
+    except Exception as e:
+        return Result.fail_with_msg(f"{username} login facebook failed:{e.args[0]}")
+    finally:
+        await page.close()
+    return Result.ok(f"{username} login facebook success")
+
+
 async def instagram_login(username: str, password: str):
     browser_ = await get_browser()
     instagram_home = "https://www.instagram.com/"
@@ -144,6 +207,8 @@ async def instagram_login(username: str, password: str):
 async def login(platform: str, username: str, password: str):
     if platform == "instagram":
         return await instagram_login(username, password)
+    if platform == "facebook":
+        return await fb_login(username, password)
 
 
 @app.get("/scrape")
