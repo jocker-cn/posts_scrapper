@@ -50,6 +50,109 @@ def instagram_extract_post_id(url):
     return None
 
 
+def adjust_tiktok_date(push_time):
+    # 获取当前年份
+    current_year = datetime.now().year
+
+    # 如果日期格式是 'YYYY-MM-DD'（例如 '2024-05-01'）
+    if re.match(r"\d{4}-\d{2}-\d{2}", push_time):
+        # 直接将其转为 'YYYY-MM-DD 00:00:00'
+        return datetime.strptime(push_time, "%Y-%m-%d").strftime("%Y-%m-%d 00:00:00")
+
+    # 如果日期格式是 'M-D' 或 'MM-DD'（例如 '1-2' 或 '11-25'）
+    elif re.match(r"\d{1,2}-\d{1,2}", push_time):
+        # 使用当前年份并拼接 'YYYY-MM-DD' 格式
+        return datetime.strptime(f"{current_year}-{push_time}", "%Y-%m-%d").strftime("%Y-%m-%d 00:00:00")
+
+    # 如果不符合上述格式，返回原始输入
+    return push_time
+
+
+async def tiktok_parse(link):
+    if not browser:
+        await create_page()
+    page = None
+    try:
+        page = await browser.new_page()
+        await page.set_viewport_size({"width": 1920, "height": 1080})
+        await page.goto(link)
+
+        username = await page.wait_for_selector('xpath=//span[@data-e2e="browse-username"]', timeout=10000)
+        if username:
+            username = await username.text_content()
+        profile_url = f"https://www.tiktok.com/@{username}"
+        push_time = await page.query_selector('xpath=//span[@data-e2e="browser-nickname"]/span[3]')
+        if push_time:
+            push_time = await push_time.text_content()
+        push_time = adjust_tiktok_date(push_time)
+
+        match = re.search(r"/video/(\d+)", page.url)
+        post_id = ""
+        if match:
+            post_id = match.group(1)
+
+        tag_links = await page.query_selector_all('xpath=//a[starts-with(@href, "/tag/")]')
+        tags = []
+        for tag in tag_links:
+            href = await tag.get_attribute('href')
+            if '/tag/' in href:
+                tag = '#' + href.split('/tag/')[1]
+                tags.append(tag)
+        avatar_url = await page.query_selector('xpath=//span[@shape="circle"]//img[@loading="lazy"]')
+        if avatar_url:
+            avatar_url = await avatar_url.get_attribute('src')
+        else:
+            avatar_url = ""
+        push_content = await page.query_selector('xpath=//h1[@data-e2e="browse-video-desc"]/span[1]')
+        if push_content:
+            push_content = await push_content.text_content()
+        else:
+            push_content = ""
+
+        likes = await page.query_selector('xpath=//strong[@data-e2e="like-count"]')
+        if likes:
+            likes = await likes.text_content()
+        likes = parse_number(likes)
+
+        comments = await page.query_selector('xpath=//strong[@data-e2e="comment-count"]')
+        if comments:
+            comments = await comments.text_content()
+        comments = parse_number(comments)
+
+        loves = await page.query_selector('xpath=//strong[@data-e2e="share-count"]')
+        if loves:
+            loves = await loves.text_content()
+        loves = parse_number(loves)
+
+        share = await page.query_selector('xpath=//strong[@data-e2e="undefined-count"]')
+        if share:
+            share = await share.text_content()
+        share = parse_number(share)
+
+        return Result.ok({
+            "username": username,
+            "profileId": username,
+            "profileUrl": profile_url,
+            "postLink": link,
+            "postId": post_id,
+            "tags": tags,
+            "profileImage": avatar_url,
+            "pushTime": push_time,
+            "content": push_content,
+            "retweets": share,
+            "likes": likes,
+            "lovers": loves,
+            "comments": comments,
+        }).to_dict()
+    except Exception as e:
+        print(f"post parse exception:{e}")
+        await close_page()
+        return Result.fail_with_msg(f"tiktok [{link}] parse failed: {e.args[0]}")
+    finally:
+        if page:
+            await page.close()
+
+
 async def fb_parse(link):
     if not browser:
         await create_page()
@@ -236,10 +339,11 @@ async def fb_parse(link):
             """)
         if reel_page:
             # 获取 class 为指定值的第 3、4、5 个 div 元素
-            like_count=0
-            comments=0
-            share=0
-            div_elements = await page.query_selector_all('xpath=//div[@class="x9f619 x1n2onr6 x1ja2u2z x78zum5 xdt5ytf x2lah0s x193iq5w x1xmf6yo x1e56ztr xzboxd6 x14l7nz5"][position() >= 3 and position() <= 5]')
+            like_count = 0
+            comments = 0
+            share = 0
+            div_elements = await page.query_selector_all(
+                'xpath=//div[@class="x9f619 x1n2onr6 x1ja2u2z x78zum5 xdt5ytf x2lah0s x193iq5w x1xmf6yo x1e56ztr xzboxd6 x14l7nz5"][position() >= 3 and position() <= 5]')
             for div_element in div_elements:
                 aria_label_div = await div_element.query_selector('div[aria-label="赞"]')
                 if aria_label_div:
@@ -301,9 +405,9 @@ async def fb_parse(link):
             }
             """)
 
-        like_count=parse_number(like_count)
-        comments=parse_number(comments)
-        share=parse_number(share)
+        like_count = parse_number(like_count)
+        comments = parse_number(comments)
+        share = parse_number(share)
         return Result.ok({
             'avatarUrl': avatar_url,
             'username': username,
@@ -320,9 +424,12 @@ async def fb_parse(link):
 
     except Exception as e:
         print(f"post parse exception:{e}")
+        await close_page()
         return Result.fail_with_msg(f"fb [{link}] parse failed: {e.args[0]}")
     finally:
-        await page.close()
+        if page:
+            await page.close()
+
 
 def parse_number(number_text):
     # 如果文本为空或无效，直接返回 0
@@ -330,18 +437,26 @@ def parse_number(number_text):
         return 0
 
     # 去掉文本中的空格和逗号
-    number_text = number_text.replace(",", "").replace(" ","").strip()
+    number_text = number_text.replace(",", "").replace(" ", "").strip()
 
-    # 正则处理 '万' 的情况
     match = re.match(r"(\d+(\.\d+)?)\s?万", number_text)
     if match:
         return int(float(match.group(1)) * 10000)
+
+    match_k = re.match(r"(\d+(\.\d+)?)\s?K", number_text, re.IGNORECASE)
+    if match_k:
+        return int(float(match_k.group(1)) * 1000)
+
+    match_m = re.match(r"(\d+(\.\d+)?)\s?M", number_text, re.IGNORECASE)
+    if match_m:
+        return int(float(match_m.group(1)) * 1000000)
 
     # 如果没有 '万'，直接转为整数
     try:
         return int(number_text)
     except ValueError:
         return 0
+
 
 async def parse_relative_time(relative_str):
     now = datetime.now()
@@ -412,12 +527,11 @@ async def instagram_parse(link):
         tags = set()
         for tag in tag_links:
             href = await tag.get_attribute("href")
-            # 提取标签名 (即 href 中的 xxxx)
             tag_name = href.split("/explore/tags/")[1].strip("/") if href else None
             tags.add(tag_name)
         tags = list(tags)
         await page.close()
-        likes=parse_number(likes)
+        likes = parse_number(likes)
         return Result.ok({
             "username": username,
             "profileId": username,
@@ -431,7 +545,7 @@ async def instagram_parse(link):
             "retweets": 0,
             "likes": likes,
             "comments": 0,
-        }).to_dict()
+        })
     except Exception as e:
         if page:
             await page.close()
@@ -562,11 +676,10 @@ async def scrape(request: Request):
         return await instagram_parse(link)
     if type_ == "facebook":
         return await fb_parse(link)
+    if type_ == "tiktok":
+        return await tiktok_parse(link)
 
-    return {
-        "link": link,
-        "type": type_,
-    }
+    return Result.fail_with_msg(f"not support platform:{type_}")
 
 
 def parse_args():
