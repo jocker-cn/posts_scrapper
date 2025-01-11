@@ -912,7 +912,7 @@ async def create_page():
         # 要想通过这个下载文件这个必然要开  默认是False
         accept_downloads=True,
         # 设置不是无头模式
-        headless=False,
+        headless=True,
         bypass_csp=True,
         slow_mo=10,
         locale='en-SG',
