@@ -66,6 +66,17 @@ def adjust_tiktok_date(push_time):
         # 使用当前年份并拼接 'YYYY-MM-DD' 格式
         return datetime.strptime(f"{current_year}-{push_time}", "%Y-%m-%d").strftime("%Y-%m-%d 00:00:00")
 
+    elif re.match(r"\d{1,2}d ago", push_time):
+        # 使用正则提取数字（天数）
+        days_ago = int(re.match(r"(\d{1,2})d ago", push_time).group(1))
+        # 获取当前时间并减去相应的天数
+        return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d 00:00:00")
+
+    elif re.match(r"\d{1,2}h ago", push_time):
+        # 提取小时数
+        hours_ago = int(re.match(r"(\d{1,2})h ago", push_time).group(1))
+        # 返回当前时间减去相应小时数
+        return (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d %H:%M:%S")
     # 如果不符合上述格式，返回原始输入
     return push_time
 
@@ -901,7 +912,7 @@ async def create_page():
         # 要想通过这个下载文件这个必然要开  默认是False
         accept_downloads=True,
         # 设置不是无头模式
-        headless=True,
+        headless=False,
         bypass_csp=True,
         slow_mo=10,
         locale='en-SG',
