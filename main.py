@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import contextlib
 
 import json
@@ -7,6 +6,7 @@ import logging
 import multiprocessing
 import re
 import sys
+import threading
 from datetime import datetime, timedelta
 from time import sleep
 
@@ -66,6 +66,103 @@ def adjust_tiktok_date(push_time):
 
     # 如果不符合上述格式，返回原始输入
     return push_time
+
+
+async def x_parse(link):
+    if not browser:
+        await create_page()
+    page = None
+    try:
+        page = await browser.new_page()
+        await page.set_viewport_size({"width": 1920, "height": 1080})
+        await page.goto(link)
+        await page.wait_for_selector('//div[@data-testid="User-Name"]', timeout=10000)
+        user_info_div = page.locator('//div[@data-testid="User-Name"]')
+        user_info_div = user_info_div.locator('//a[@href]')
+        profile_id = ""
+        if user_info_div and await user_info_div.count() > 0:
+            print("user_info_div")
+            profile_id = await user_info_div.nth(0).get_attribute("href")
+            if profile_id:
+                profile_id = profile_id.replace("/", "@")
+        username = await user_info_div.locator('span span').text_content()
+        profile_url = f"https://x.com/{profile_id.replace("@", "")}"
+        post_id = page.url.split('/')[-1]
+
+        hashtags = page.locator('a[href*="/hashtag/"]')
+        hashtags_set = set()
+        if await hashtags.count() > 0:
+            for tag in await hashtags.all():
+                tag = await tag.get_attribute("href")
+                if tag:
+                    hashtags_set.add(f"#{tag.split('/hashtag/')[1].split('?')[0]}")
+        tags = list(hashtags_set)
+
+        tweet_text_div = page.locator('//div[@data-testid="tweetText"]')
+        tweet_text_div = tweet_text_div.locator('span').nth(0)
+        push_content = ""
+        if await tweet_text_div.count() > 0:
+            tweet_text_div = tweet_text_div.nth(0)
+            push_content = await tweet_text_div.text_content()
+
+        push_time = page.locator('//time[@datetime]')
+        push_time = await push_time.nth(0).get_attribute("datetime")
+        if push_time:
+            push_time = datetime.fromisoformat(push_time)
+            push_time = push_time.strftime("%Y-%m-%d %H:%M:%S")
+        avatar_url = f"{profile_url}/photo"
+        share = 0
+        likes = 0
+        loves = 0
+        comments = 0
+        views = 0
+        count_element = page.locator(
+            "//div[@role='group' and (contains(@aria-label, 'replies') or contains(@aria-label, 'reposts') or contains(@aria-label, 'likes') or contains(@aria-label, 'bookmarks') or contains(@aria-label, 'views') or contains(@aria-label, '回复') or contains(@aria-label, '次转贴') or contains(@aria-label, '喜欢') or contains(@aria-label, '书签') or contains(@aria-label, '次观看'))]")
+        if await count_element.count() > 0:
+            count_element = count_element.nth(0)
+            count_element = await count_element.get_attribute('aria-label')
+            if count_element != '':
+                count_element = count_element.split(',')
+                for item in count_element:
+                    match = re.search(r'(\d+)', item)
+                    if match:
+                        value = match.group(1)
+                        if '回复' in item or 'replies' in item:
+                            comments = value  # 获取回复的数值
+                        elif '转帖' in item or 'reposts' in item:
+                            share = value  # 获取转帖的数值
+                        elif '喜欢' in item or 'likes' in item:
+                            likes = value  # 获取喜欢的数值
+                        elif '书签' in item or 'bookmarks' in item:
+                            loves = value  # 获取书签的数值
+                        elif '观看' in item or 'views' in item:
+                            views = value  # 获取观看的数值
+
+
+
+        return Result.ok({
+            "username": username,
+            "profileId": profile_id,
+            "profileUrl": profile_url,
+            "postLink": link,
+            "postId": post_id,
+            "tags": tags,
+            "profileImage": avatar_url,
+            "pushTime": push_time,
+            "content": push_content,
+            "retweets": share,
+            "likes": likes,
+            "lovers": loves,
+            "comments": comments,
+            "views": views,
+        }).to_dict()
+    except Exception as e:
+        print(f"post parse exception:{e}")
+        await close_page()
+        return Result.fail_with_msg(f"x [{link}] parse failed: {e.args[0]}")
+    finally:
+        if page:
+            await page.close()
 
 
 async def tiktok_parse(link):
@@ -432,11 +529,14 @@ async def fb_parse(link):
 
 
 def parse_number(number_text):
-    # 如果文本为空或无效，直接返回 0
-    if not number_text.strip():
-        return 0
 
-    # 去掉文本中的空格和逗号
+    if isinstance(number_text, (int, float)):
+        return number_text
+
+    number_text = re.sub(r"(likes?|次赞)", "", number_text.strip(), flags=re.IGNORECASE)
+    if not number_text or not number_text.strip():
+      return 0
+
     number_text = number_text.replace(",", "").replace(" ", "").strip()
 
     match = re.match(r"(\d+(\.\d+)?)\s?万", number_text)
@@ -508,15 +608,27 @@ async def instagram_parse(link):
         page = await browser.new_page()
         await page.set_viewport_size({"width": 1920, "height": 1080})
         await page.goto(link)
-        # 发布时间
+
+        try:
+            await page.wait_for_selector('svg[aria-label="Close"]', timeout=2000)
+            close_button = page.locator('svg[aria-label="Close"]')
+            await close_button.click()
+        except:
+            pass
+
         push_datetime = await page.locator("(//time)[last()]").get_attribute("datetime")
         push_time = datetime.strptime(push_datetime, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d %H:%M:%S")
         # 点赞数量
-        likes = page.locator("(//a[span[contains(text(), 'likes')]])/span/span")
+        likes = page.locator("(//a[span[contains(text(), 'likes') or contains(text(), 'like') or contains(text(), '次赞')]])")
         if await likes.count() > 0:
             likes = await likes.text_content()
         else:
-            likes = 0
+            likes = page.locator("(//a[span[contains(text(), 'likes') or contains(text(), 'like') or contains(text(), '次赞')]]/span/span)")
+            if await likes.count() > 0:
+                likes = await likes.text_content()
+            else:
+                likes = 0
+
         avatar_url = await page.locator("(//img[contains(@alt, 'profile picture')])[1]").get_attribute("src")
         username = await page.locator("(//img[contains(@alt, 'profile picture')])[1]").get_attribute("alt")
         username = username.split("'s profile picture")[0] if username else ""
@@ -528,7 +640,7 @@ async def instagram_parse(link):
         for tag in tag_links:
             href = await tag.get_attribute("href")
             tag_name = href.split("/explore/tags/")[1].strip("/") if href else None
-            tags.add(tag_name)
+            tags.add(f"#{tag_name}")
         tags = list(tags)
         await page.close()
         likes = parse_number(likes)
@@ -547,10 +659,15 @@ async def instagram_parse(link):
             "comments": 0,
         })
     except Exception as e:
-        if page:
-            await page.close()
         await close_page()
         return Result.fail_with_msg(f"instagram parse failed:{e.args[0]}")
+    finally:
+        if page:
+            await page.close()
+
+
+async def x_login(username: str, password: str):
+    TWITTER_LOGIN_URL = "https://x.com/i/flow/login"
 
 
 async def fb_login(username: str, password: str):
@@ -559,8 +676,7 @@ async def fb_login(username: str, password: str):
     try:
         page = await browser_.new_page()
     except Exception as e:
-        global browser
-        browser = None
+        await close_page()
         return Result.fail_with_msg(f"new page failed:{e.args[0]}")
     try:
         await page.set_viewport_size({"width": 1920, "height": 1080})
@@ -619,15 +735,16 @@ async def fb_login(username: str, password: str):
 
 async def instagram_login(username: str, password: str):
     browser_ = await get_browser()
-    instagram_home = "https://www.instagram.com/"
+    instagram_home = "https://www.instagram.com/login"
     page: Page = await browser_.new_page()
-    await page.set_viewport_size({"width": 1920, "height": 1080})
-    await page.evaluate("() => document.body.style.zoom='90%'")
-    print(f"GO TO {instagram_home}")
-    await page.goto(instagram_home)
-    login_button_xpath = '//button[.//div[text()="Log in"]]'
-    login_button_locator = page.locator(login_button_xpath)
     try:
+        await page.set_viewport_size({"width": 1920, "height": 1080})
+        await page.evaluate("() => document.body.style.zoom='90%'")
+        print(f"GO TO {instagram_home}")
+        await page.goto(instagram_home)
+        login_button_xpath = '//button[.//div[text()="Log in"]]'
+        await page.wait_for_selector(login_button_xpath, timeout=5000)
+        login_button_locator = page.locator(login_button_xpath)
         if await login_button_locator.is_visible():
             user_name_input_xpath = '//input[@name="username"]'
             await page.fill(user_name_input_xpath, username)
@@ -645,14 +762,44 @@ async def instagram_login(username: str, password: str):
             if await save_button_locator.is_visible():
                 await save_button_locator.click()
             sleep(1)
+        try:
+            await page.wait_for_selector('input[type="text"][value=""][name="email"]', timeout=5000)
+            input_code = page.locator('input[type="text"][value=""][name="email"]')
+            if await input_code.count() > 0:
+                captcha_code = await get_input_with_timeout("input instagram code: ",60)
+                await input_code.fill(captcha_code)
+                continue_button = page.locator('//span[text()="Continue"]')
+                await continue_button.click()
+        except:
+            logging.warning("no instagram code check")
 
         home_span = page.locator("//span[text()='Home' or text()='主页']")
         await home_span.wait_for(state="visible", timeout=5000)  # 等待元素可见
         await page.close()
     except Exception as e:
+        await close_page()
         return Result.fail_with_msg(f"instagram [{username}] login failed:{e.args[0]}")
+    finally:
+        if page:
+            await page.close()
     return Result.ok(f"instagram [{username}] login success")
 
+
+async def get_input_with_timeout(prompt, timeout):
+    result = []
+    def input_thread():
+        user_input = input(prompt)
+        result.append(user_input)
+
+    thread = threading.Thread(target=input_thread)
+    thread.daemon = True
+    thread.start()
+
+    thread.join(timeout)
+    if result:
+        return result[0]
+    else:
+        raise TimeoutError(f"User did not input within {timeout} seconds.")
 
 @app.get("/login")
 async def login(platform: str, username: str, password: str):
@@ -660,6 +807,8 @@ async def login(platform: str, username: str, password: str):
         return await instagram_login(username, password)
     if platform == "facebook":
         return await fb_login(username, password)
+    if platform == "x":
+        return await  x_login(username, password)
 
 
 @app.get("/scrape")
@@ -678,6 +827,8 @@ async def scrape(request: Request):
         return await fb_parse(link)
     if type_ == "tiktok":
         return await tiktok_parse(link)
+    if type_ == "x":
+        return await x_parse(link)
 
     return Result.fail_with_msg(f"not support platform:{type_}")
 
