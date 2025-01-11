@@ -1,5 +1,6 @@
-FROM docker.io/playwright/chrome:playwright-1.49.1
+FROM mcr.microsoft.com/playwright/python:latest
 LABEL maintainter="jockerCN <zh13825080826@gmail.com> https://github.com/jocker-cn"
+USER root
 WORKDIR /scrapper
 ADD dist/main /scrapper/
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
