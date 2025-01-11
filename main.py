@@ -86,9 +86,9 @@ async def x_parse(link):
             print("user_info_div")
             profile_id = await user_info_div.nth(0).get_attribute("href")
             if profile_id:
-                profile_id = profile_id.replace("/", "@")
+                profile_id = profile_id.replace('/', '@')
         username = await user_info_div.locator('span span').text_content()
-        profile_url = f"https://x.com/{profile_id.replace("@", "")}"
+        profile_url = f"https://x.com/{profile_id.replace('@', '')}"
         post_id = page.url.split('/')[-1]
 
         hashtags = page.locator('a[href*="/hashtag/"]')
