@@ -14,6 +14,7 @@ from time import sleep
 
 from fastapi import FastAPI, Request
 from playwright.async_api import async_playwright, BrowserContext, Page
+from starlette.responses import PlainTextResponse
 
 from result import Result
 
@@ -151,8 +152,6 @@ async def x_parse(link):
                         elif '观看' in item or 'views' in item:
                             views = value  # 获取观看的数值
 
-
-
         return Result.ok({
             "username": username,
             "profileId": profile_id,
@@ -263,6 +262,37 @@ async def tiktok_parse(link):
             await page.close()
 
 
+def extract_facebook_url(profile_url):
+    if '/user/' in profile_url:
+        return profile_url.split('/?')[0]
+    if profile_url.startswith("https://www.facebook.com/profile.php?id="):
+        match = re.match(r'(https://www.facebook.com/profile.php\?id=\d+)', profile_url)
+        if match:
+            return match.group(1)
+    return profile_url
+
+
+def extract_facebook_post_link(post_link):
+    if '/posts/' in post_link:
+        return post_link.split('/?')[0]
+    return post_link
+
+def extract_facebook_post_id(post_link):
+    if '/posts/' in post_link:
+        return post_link.split('/?')[1]
+    return post_link
+
+
+def extract_facebook_id(profile_url):
+    if profile_url.startswith("https://www.facebook.com/profile.php?id="):
+        match = re.search(r'id=(\d+)', profile_url)
+        if match:
+            return match.group(1)  # 返回匹配的 id 值
+    if '/user/' in profile_url:
+        return profile_url.split('/user/')[1]
+    return profile_url
+
+
 async def fb_parse(link):
     if not browser:
         await create_page()
@@ -271,6 +301,14 @@ async def fb_parse(link):
         page = await browser.new_page()
         await page.set_viewport_size({"width": 1920, "height": 1080})
         await page.goto(link)
+
+        try:
+            await page.wait_for_selector('//div[@aria-label="Close"]', timeout=2000)
+            element = await page.query_selector('//div[@aria-label="Close"]')
+            if element:
+                await element.click()
+        except Exception as e:
+            logging.info(f"no login dialog: {e.args[0]}")
 
         current_url = page.url
         reel_page = '/reel/' in current_url
@@ -286,6 +324,8 @@ async def fb_parse(link):
                 return Result.fail_with_msg(f"fb {link} parse failed")
         else:
             post = await page.query_selector('xpath=//div[@aria-posinset="1"]')
+            if not post:
+                post = await page.query_selector('xpath=//div[@aria-posinset="2"]')
         is_reels = await post.evaluate("""
         (element) => {
             return element.querySelector('[data-pagelet="Reels"]') !== null;
@@ -389,14 +429,15 @@ async def fb_parse(link):
             }
             """)
         else:
-            profile_id = await post.evaluate(
+            profile_url = await post.evaluate(
                 """     (element) => {       
                         const profileLinkElement = element.querySelector('[data-ad-rendering-role="profile_name"] a');    
                         return profileLinkElement ? profileLinkElement.href : null;  
                 } """)
-            if profile_id:
-                profile_id = profile_id.split('/?')[0]
-                # profile_id = f"https://www.facebook.com/profile.php?id={profile_id}"
+            profile_id = ""
+            if profile_url:
+                profile_url = extract_facebook_url(profile_url)
+                profile_id = extract_facebook_id(profile_url)
             username = await post.evaluate("""
                 (element) => {
                     const profileNameElement = element.querySelector('[data-ad-rendering-role="profile_name"] span a span');
@@ -415,11 +456,11 @@ async def fb_parse(link):
                 return aTag ? aTag.href : null;
                 }
              """)
-            post_id = ""
-            if post_link:
-                post_link = post_link.split('/?')[0]
-            if post_link:
-                post_id = post_link.split('/posts/')[1]
+            if not post_link:
+                post_link = current_url
+            post_link = extract_facebook_post_link(post_link)
+
+            post_id = extract_facebook_post_id(post_link)
             timestamp = await post.query_selector_all(
                 'xpath=//a[contains(@aria-label, "小时") or contains(@aria-label, "分钟") or contains(@aria-label, "天") or contains(@aria-label, "月") or contains(@aria-label, "年")]')
             if timestamp:
@@ -483,6 +524,10 @@ async def fb_parse(link):
                             }
                         }
                     }
+                   const targetSpan = element.querySelector('span[aria-hidden="true"] span.x1e558r4');
+                    if (targetSpan) {
+                        return targetSpan.textContent.trim();
+                    }
                     return 0;
                 }
                 """)
@@ -492,6 +537,12 @@ async def fb_parse(link):
                         for (let span of spans) {
                         if (span.textContent.includes('条评论')) {
                             const match = span.textContent.match(/(\\d+)\\s*条评论/);
+                            if (match) {
+                                return match[1];
+                            }
+                        }
+                        if (span.textContent.includes('comments') ) {
+                            const match = span.textContent.match(/(\\d+)\\s*comments/);
                             if (match) {
                                 return match[1];
                             }
@@ -510,6 +561,12 @@ async def fb_parse(link):
                             return match[1];
                         }
                     }
+                    if (span.textContent.includes('share')) {
+                        const match = span.textContent.match(/(\\d+)\\s*share/);
+                        if (match) {
+                            return match[1];
+                        }
+                    }
                 }
                 return 0;
             }
@@ -519,17 +576,18 @@ async def fb_parse(link):
         comments = parse_number(comments)
         share = parse_number(share)
         return Result.ok({
-            'avatarUrl': avatar_url,
+            'profileImage': avatar_url,
             'username': username,
             'profileId': profile_id,
+            'profileUrl': profile_url,
             'pushTime': timestamp,
-            'postContent': post_content,
+            'content': post_content,
             'postLink': post_link,
             'postId': post_id,
-            'hashtags': hashtags,
+            'tags': hashtags,
             'like': like_count,
             'comments': comments,
-            'share': share,
+            'retweets': share,
         })
 
     except Exception as e:
@@ -542,13 +600,12 @@ async def fb_parse(link):
 
 
 def parse_number(number_text):
-
     if isinstance(number_text, (int, float)):
         return number_text
 
     number_text = re.sub(r"(likes?|次赞)", "", number_text.strip(), flags=re.IGNORECASE)
     if not number_text or not number_text.strip():
-      return 0
+        return 0
 
     number_text = number_text.replace(",", "").replace(" ", "").strip()
 
@@ -632,11 +689,13 @@ async def instagram_parse(link):
         push_datetime = await page.locator("(//time)[last()]").get_attribute("datetime")
         push_time = datetime.strptime(push_datetime, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d %H:%M:%S")
         # 点赞数量
-        likes = page.locator("(//a[span[contains(text(), 'likes') or contains(text(), 'like') or contains(text(), '次赞')]])")
+        likes = page.locator(
+            "(//a[span[contains(text(), 'likes') or contains(text(), 'like') or contains(text(), '次赞')]])")
         if await likes.count() > 0:
             likes = await likes.text_content()
         else:
-            likes = page.locator("(//a[span[contains(text(), 'likes') or contains(text(), 'like') or contains(text(), '次赞')]]/span/span)")
+            likes = page.locator(
+                "(//a[span[contains(text(), 'likes') or contains(text(), 'like') or contains(text(), '次赞')]]/span/span)")
             if await likes.count() > 0:
                 likes = await likes.text_content()
             else:
@@ -779,7 +838,7 @@ async def instagram_login(username: str, password: str):
             await page.wait_for_selector('input[type="text"][value=""][name="email"]', timeout=5000)
             input_code = page.locator('input[type="text"][value=""][name="email"]')
             if await input_code.count() > 0:
-                captcha_code = await get_input_with_timeout("input instagram code: ",60)
+                captcha_code = await get_input_with_timeout("input instagram code: ", 60)
                 await input_code.fill(captcha_code)
                 continue_button = page.locator('//span[text()="Continue"]')
                 await continue_button.click()
@@ -800,6 +859,7 @@ async def instagram_login(username: str, password: str):
 
 async def get_input_with_timeout(prompt, timeout):
     result = []
+
     def input_thread():
         user_input = input(prompt)
         result.append(user_input)
@@ -814,6 +874,7 @@ async def get_input_with_timeout(prompt, timeout):
     else:
         raise TimeoutError(f"User did not input within {timeout} seconds.")
 
+
 @app.get("/login")
 async def login(platform: str, username: str, password: str):
     if platform == "instagram":
@@ -824,23 +885,26 @@ async def login(platform: str, username: str, password: str):
         return await  x_login(username, password)
 
 
+@app.get("/health", response_class=PlainTextResponse)
+async def health(request: Request):
+    return 'ok'
+
+
 @app.get("/scrape")
 async def scrape(request: Request):
-    print("scrape")
-
     body = await request.body()
     data = json.loads(body)
 
     link = data.get("link")
     type_ = data.get("type")
-
+    logging.info(f"parse [{type_}] link [{link}]")
     if type_ == "instagram":
         return await instagram_parse(link)
     if type_ == "facebook":
         return await fb_parse(link)
     if type_ == "tiktok":
         return await tiktok_parse(link)
-    if type_ == "x":
+    if type_ == "twitter":
         return await x_parse(link)
 
     return Result.fail_with_msg(f"not support platform:{type_}")
@@ -901,7 +965,7 @@ async def close_page():
 
 
 async def create_page():
-    print("create playwright browser")
+    logging.info("create playwright browser")
     global playwright, browser
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch_persistent_context(  # 指定本机用户缓存地址
@@ -912,7 +976,7 @@ async def create_page():
         # 要想通过这个下载文件这个必然要开  默认是False
         accept_downloads=True,
         # 设置不是无头模式
-        headless=True,
+        headless=False,
         bypass_csp=True,
         slow_mo=10,
         locale='en-SG',
