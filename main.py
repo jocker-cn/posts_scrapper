@@ -11,6 +11,7 @@ import sys
 import threading
 from datetime import datetime, timedelta
 from time import sleep
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from playwright.async_api import async_playwright, BrowserContext, Page
@@ -78,7 +79,12 @@ def adjust_tiktok_date(push_time):
         hours_ago = int(re.match(r"(\d{1,2})h ago", push_time).group(1))
         # 返回当前时间减去相应小时数
         return (datetime.now() - timedelta(hours=hours_ago)).strftime("%Y-%m-%d %H:%M:%S")
-    # 如果不符合上述格式，返回原始输入
+
+    elif re.match(r"\d{1,2}w ago", push_time):
+        # 使用正则提取周数
+        weeks_ago = int(re.match(r"(\d{1,2})w ago", push_time).group(1))
+        return (datetime.now() - timedelta(weeks=weeks_ago)).strftime("%Y-%m-%d 00:00:00")
+
     return push_time
 
 
@@ -264,22 +270,41 @@ async def tiktok_parse(link):
 
 def extract_facebook_url(profile_url):
     if '/user/' in profile_url:
+        if profile_url.startswith("/groups/"):
+            return f"https://www.facebook.com{profile_url.split('/?')[0]}"
         return profile_url.split('/?')[0]
+
+    if profile_url.startswith("/profile.php?id="):
+        if profile_url.startswith("/profile.php?id="):
+            return f"https://www.facebook.com{profile_url.split('&')[0]}"
+
+    if profile_url.startswith("https://l.facebook.com/l.php?u"):
+        return profile_url
+
     if profile_url.startswith("https://www.facebook.com/profile.php?id="):
         match = re.match(r'(https://www.facebook.com/profile.php\?id=\d+)', profile_url)
         if match:
             return match.group(1)
+
+    match = re.match(r"^https://www\.facebook\.com/([A-Za-z0-9_.-]+)\?__cft__\[\d+\]=.*", profile_url)
+    if match:
+        # 提取符合条件的基本 URL 部分
+        parsed_url = urlparse(profile_url)
+        return f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
     return profile_url
 
 
 def extract_facebook_post_link(post_link):
     if '/posts/' in post_link:
+        if '?__cft__' in post_link:
+            return post_link.split('?__cft__')[0]
         return post_link.split('/?')[0]
     return post_link
 
+
 def extract_facebook_post_id(post_link):
     if '/posts/' in post_link:
-        return post_link.split('/?')[1]
+        return post_link.split('/posts/')[1]
     return post_link
 
 
@@ -290,6 +315,13 @@ def extract_facebook_id(profile_url):
             return match.group(1)  # 返回匹配的 id 值
     if '/user/' in profile_url:
         return profile_url.split('/user/')[1]
+
+    match = re.match(r"^https://www\.facebook\.com/([A-Za-z0-9_.-]+)$", profile_url)
+
+    if match:
+        # 提取用户名部分
+        return match.group(1)
+
     return profile_url
 
 
@@ -380,7 +412,7 @@ async def fb_parse(link):
             post_link = ""
             if post_id:
                 post_link = f"https://www.facebook.com/reel/{post_id}"
-            profile_id = await post.evaluate("""
+            profile_url = await post.evaluate("""
               (element) => {
                 const linkElement = element.querySelector('a[aria-label="查看所有者个人主页"]');
                 if (linkElement) {
@@ -389,11 +421,12 @@ async def fb_parse(link):
                 return null;
               }
             """)
-            if profile_id:
+            if profile_url:
                 if reel_page:
-                    profile_id = f"https://www.facebook.com{profile_id.split('&')[0]}"
+                    profile_url = extract_facebook_url(profile_url)
                 else:
-                    profile_id = f"https://www.facebook.com{profile_id.split('/?')[0]}"
+                    profile_url = extract_facebook_url(profile_url)
+            profile_id = extract_facebook_id(profile_url)
 
             timestamp = await page.query_selector(
                 'xpath=//span[contains(text(), "分钟") or contains(text(), "小时") or contains(text(), "天") or contains(text(), "月") or contains(text(), "年")]')
@@ -459,7 +492,6 @@ async def fb_parse(link):
             if not post_link:
                 post_link = current_url
             post_link = extract_facebook_post_link(post_link)
-
             post_id = extract_facebook_post_id(post_link)
             timestamp = await post.query_selector_all(
                 'xpath=//a[contains(@aria-label, "小时") or contains(@aria-label, "分钟") or contains(@aria-label, "天") or contains(@aria-label, "月") or contains(@aria-label, "年")]')
@@ -536,13 +568,13 @@ async def fb_parse(link):
                         const spans = Array.from(element.querySelectorAll('span'));
                         for (let span of spans) {
                         if (span.textContent.includes('条评论')) {
-                            const match = span.textContent.match(/(\\d+)\\s*条评论/);
+                            const match = span.textContent.match(/(.*?)条评论/);
                             if (match) {
                                 return match[1];
                             }
                         }
                         if (span.textContent.includes('comments') ) {
-                            const match = span.textContent.match(/(\\d+)\\s*comments/);
+                            const match = span.textContent.match(/(.*?)comments/);
                             if (match) {
                                 return match[1];
                             }
@@ -556,13 +588,13 @@ async def fb_parse(link):
                     const spans = Array.from(element.querySelectorAll('span'));
                     for (let span of spans) {
                     if (span.textContent.includes('次分享')) {
-                        const match = span.textContent.match(/(\\d+)\\s*次分享/);
+                        const match = span.textContent.match(/(.*?)次分享/);
                         if (match) {
                             return match[1];
                         }
                     }
                     if (span.textContent.includes('share')) {
-                        const match = span.textContent.match(/(\\d+)\\s*share/);
+                        const match = span.textContent.match(/(.*?)share/);
                         if (match) {
                             return match[1];
                         }
@@ -585,7 +617,7 @@ async def fb_parse(link):
             'postLink': post_link,
             'postId': post_id,
             'tags': hashtags,
-            'like': like_count,
+            'likes': like_count,
             'comments': comments,
             'retweets': share,
         })
